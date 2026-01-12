@@ -32,4 +32,4 @@ jobs:
         run: |
           pip install PyGithub openai requests
           npm install -g @openai/codex
-          python .certik/scripts/eip_reviewer.py
+          python .certik/scripts/codex_eip_reviewer.py
