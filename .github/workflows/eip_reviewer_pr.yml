@@ -32,4 +32,6 @@ jobs:
         run: |
           pip install PyGithub openai requests
           npm install -g @openai/codex
+          printenv OPENAI_API_KEY | codex login --with-api-key
           python .certik/scripts/codex_eip_reviewer.py
+    
