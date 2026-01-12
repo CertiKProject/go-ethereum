@@ -65,7 +65,7 @@ def write_diff_chunks(chunks: Dict[str, str]) -> Tuple[tempfile.TemporaryDirecto
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(content, encoding="utf-8")
         diff_paths[path] = dest
-
+    print("diff files: ", diff_paths.keys())
     return tmp_dir, diff_paths
 
 
@@ -139,7 +139,6 @@ def build_stage_one_prompt(file_path: str, diff_file: Path) -> str:
         "Stage: per-file diff review.\n"
         f"- Diff file path: {diff_file}\n"
         f"- EIP spec path: {eip_hint}\n"
-        f"- Repository root: {REPO_ROOT}\n\n"
         "Output JSON only using this schema:\n"
         f"{schema_hint}\n"
         "Use an empty issues array if there are no findings."
@@ -160,7 +159,6 @@ def build_stage_two_prompt(diff_dir: Path, diff_paths: Dict[str, Path]) -> str:
         "Stage: cross-file review across the entire PR.\n"
         f"- Diff directory: {diff_dir}\n"
         f"- Diff files:\n{path_list}\n"
-        f"- Repository root: {REPO_ROOT}\n"
         f"- EIP spec path: {eip_hint}\n\n"
         "Output JSON only using this schema:\n"
         f"{schema_hint}\n"
@@ -205,7 +203,6 @@ def build_validation_prompt(
     )
     return (
         f"{EIP_finding_validation_preprompt}\n\n"
-        f"- Repository root: {REPO_ROOT}\n"
         f"- EIP spec path: {eip_hint}\n"
         f"- Diff directory: {diff_dir}\n"
         f"- Diff files:\n{path_list}\n\n"
