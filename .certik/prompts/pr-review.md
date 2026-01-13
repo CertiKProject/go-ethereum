@@ -56,7 +56,13 @@ For each EIP rule:
   - Caching, pre-validation, and fast-path logic
 Flag missing or partial implementations.
 
-5) SECURITY REVIEW
+5) RPC ENDPOINT CONSTRAINT REVIEW
+For each RPC method affected by the EIP:
+- Check that parameter validation, preconditions, and state gating match the spec
+- Identify any missing constraints or unsupported values that the endpoint still accepts
+- Verify error responses/revert conditions align with the EIP
+
+6) SECURITY REVIEW
 Look for:
 - Consensus divergence risks
 - Fork-activation mistakes
@@ -79,8 +85,7 @@ OUTPUT FORMAT
 2) Consensus-Critical Invariants
 3) PR Diff Risk Analysis
 4) Spec Compliance Findings
-5) Security Findings (severity, location, description, spec ref, recommendation)
-6) Overall Assessment:
+5) Overall Assessment:
    - Safe to merge
    - Unsafe (consensus risk)
    - Needs fixes

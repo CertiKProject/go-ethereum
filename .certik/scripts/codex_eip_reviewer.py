@@ -2,7 +2,6 @@ import json
 import os
 import re
 import sys
-import tempfile
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -21,7 +20,7 @@ PR_NUMBER = int(os.getenv("PR_NUMBER", 0))
 DIFF_FILE_PATH = sys.argv[1] if len(sys.argv) > 1 else "pr.diff"
 CODEX_MODEL = os.getenv("CODEX_MODEL", "gpt-5.1-codex-max")
 CODEX_APPROVAL = os.getenv("CODEX_APPROVAL", "never")
-EIP_SPEC_PATH = os.getenv("EIP_SPEC_PATH", "") #relative path to EIP spec file in the repo
+EIP_SPEC_PATH = os.getenv("EIP_SPEC_PATH", "scripts/eips/eip-7825.md") #relative path to EIP spec file in the repo
 SKIP_EXTENSIONS = {".md", ".txt", ".lock"}
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -52,21 +51,22 @@ def parse_diff(diff_text: str) -> Dict[str, str]:
     return file_chunks
 
 
-def write_diff_chunks(chunks: Dict[str, str]) -> Tuple[tempfile.TemporaryDirectory, Dict[str, Path]]:
+def write_diff_chunks(chunks: Dict[str, str]) -> Tuple[Path, Dict[str, Path]]:
     """
     Persist per-file diffs so Codex can read them directly from disk.
     """
-    tmp_dir = tempfile.TemporaryDirectory(prefix="codex-diffs-")
-    diff_dir = Path(tmp_dir.name)
+    diff_root = REPO_ROOT / "diff_tmp"
+    diff_root.mkdir(parents=True, exist_ok=True)
+    diff_dir = diff_root
     diff_paths: Dict[str, Path] = {}
 
     for path, content in chunks.items():
         dest = diff_dir / path
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(content, encoding="utf-8")
-        diff_paths[path] = dest
+        diff_paths[path] = dest.relative_to(REPO_ROOT)
     print("diff files: ", diff_paths.keys())
-    return tmp_dir, diff_paths
+    return diff_dir, diff_paths
 
 
 def load_json_block(text: str) -> Dict:
@@ -341,12 +341,12 @@ def build_comments(validated: List[Dict]) -> List[Dict]:
 
 
 def main() -> None:
-    if not Path(DIFF_FILE_PATH).exists():
-        print(f"Diff file not found at {DIFF_FILE_PATH}")
-        return
-    if not (GITHUB_TOKEN and REPO_NAME and PR_NUMBER):
-        print("Missing required environment variables (GITHUB_TOKEN, REPO_NAME, PR_NUMBER).")
-        return
+    # if not Path(DIFF_FILE_PATH).exists():
+    #     print(f"Diff file not found at {DIFF_FILE_PATH}")
+    #     return
+    # if not (GITHUB_TOKEN and REPO_NAME and PR_NUMBER):
+    #     print("Missing required environment variables (GITHUB_TOKEN, REPO_NAME, PR_NUMBER).")
+    #     return
 
     diff_text = Path(DIFF_FILE_PATH).read_text(encoding="utf-8")
     chunks = parse_diff(diff_text)
@@ -355,33 +355,30 @@ def main() -> None:
         print("No diff chunks found.")
         return
 
-    tmp_dir, diff_paths = write_diff_chunks(chunks)
-    try:
-        stage1_issues, stage1_summaries = stage_one(diff_paths)
-        stage2_issues, stage2_summaries = stage_two(Path(tmp_dir.name), diff_paths)
+    diff_dir, diff_paths = write_diff_chunks(chunks)
+    stage1_issues, stage1_summaries = stage_one(diff_paths)
+    stage2_issues, stage2_summaries = stage_two(diff_dir, diff_paths)
 
-        merged_issues = stage_dedupe(stage1_issues + stage2_issues)
-        validated = stage_three_validate(merged_issues, Path(tmp_dir.name), diff_paths)
-        comments = build_comments(validated)
+    merged_issues = stage_dedupe(stage1_issues + stage2_issues)
+    validated = stage_three_validate(merged_issues, diff_dir, diff_paths)
+    comments = build_comments(validated)
 
-        summaries = stage1_summaries + stage2_summaries
-        if validated:
-            summaries.append(f"Validated findings: {len(validated)}")
-        else:
-            summaries.append("No validated issues found.")
+    summaries = stage1_summaries + stage2_summaries
+    if validated:
+        summaries.append(f"Validated findings: {len(validated)}")
+    else:
+        summaries.append("No validated issues found.")
 
-        gh = Github(GITHUB_TOKEN)
-        repo = gh.get_repo(REPO_NAME)
-        pull = repo.get_pull(PR_NUMBER)
+    gh = Github(GITHUB_TOKEN)
+    repo = gh.get_repo(REPO_NAME)
+    pull = repo.get_pull(PR_NUMBER)
+    print("Codex Review Summary:", "\n".join(summaries))
+    if comments:
+        pull.create_review(body="\n".join(f"- {s}" for s in summaries), event="COMMENT", comments=comments)
+    else:
+        pull.create_review(body="\n".join(f"- {s}" for s in summaries), event="COMMENT")
 
-        if comments:
-            pull.create_review(body="\n".join(f"- {s}" for s in summaries), event="COMMENT", comments=comments)
-        else:
-            pull.create_review(body="\n".join(f"- {s}" for s in summaries), event="COMMENT")
-
-        print(f"Posted Codex review with {len(comments)} inline comments.")
-    finally:
-        tmp_dir.cleanup()
+    print(f"Posted Codex review with {len(comments)} inline comments.")
 
 
 if __name__ == "__main__":
