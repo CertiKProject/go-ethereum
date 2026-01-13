@@ -26,6 +26,21 @@ SKIP_EXTENSIONS = {".md", ".txt", ".lock"}
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _int_env(name: str, default: int) -> int:
+    try:
+        return max(int(os.getenv(name, default)), 0)
+    except (TypeError, ValueError):
+        return default
+
+
+MAX_STAGE1_FILES = _int_env("MAX_STAGE1_FILES", 12)
+RUN_STAGE2 = (os.getenv("RUN_STAGE2", "auto") or "auto").lower()
+RUN_VALIDATION = (os.getenv("RUN_VALIDATION", "1") or "1").lower()
+SKIP_STAGE2_VALUES = {"0", "false", "off", "no"}
+RUN_STAGE2_VALUES = {"1", "true", "on", "yes"}
+RUN_VALIDATION_VALUES = {"1", "true", "on", "yes"}
+
+
 def parse_diff(diff_text: str) -> Dict[str, str]:
     """
     Minimal diff parser that splits the diff into per-file chunks.
@@ -198,7 +213,7 @@ def build_validation_prompt(
     path_list = "\n".join(f"- {p}" for p in diff_paths.values())
     schema_hint = (
         '{ "validated": [ { "path": "<file path>", "line": <new file line>, '
-        '"verdict": "VALID|INVALID|SPEC-AMBIGUOUS", '
+        '"verdict": "VALID|INVALID|SPEC-AMBIGUOUS|PARTIAL", '
         '"severity": "<CRITICAL|HIGH|MEDIUM|LOW|INFO>", '
         '"justification": "<reasoning>", "recommendation": "<action>", '
         '"spec_ref": "<optional>", "source": "<stage1|stage2>" } ] }'
@@ -234,15 +249,30 @@ def stage_one(diff_paths: Dict[str, Path]) -> Tuple[List[Dict], List[str]]:
     issues: List[Dict] = []
     summaries: List[str] = []
 
-    for path, diff_file in diff_paths.items():
-        if Path(path).suffix in SKIP_EXTENSIONS:
-            continue
+    eligible = [
+        (path, diff_file)
+        for path, diff_file in diff_paths.items()
+        if Path(path).suffix.lower() not in SKIP_EXTENSIONS
+    ]
+
+    if len(eligible) > MAX_STAGE1_FILES:
+        trimmed = eligible[:MAX_STAGE1_FILES]
+        skipped = [p for p, _ in eligible[MAX_STAGE1_FILES:]]
+        summaries.append(f"Stage1 skipped {len(skipped)} files (limit {MAX_STAGE1_FILES}).")
+    else:
+        trimmed = eligible
+        skipped = []
+
+    for path, diff_file in trimmed:
         prompt = build_stage_one_prompt(path, diff_file)
         data = run_codex_json(prompt)
         file_issues, summary = normalize_issues(data, path, "stage1")
         issues.extend(file_issues)
         if summary:
             summaries.append(f"{path}: {summary}")
+
+    for path in skipped:
+        summaries.append(f"{path}: skipped to reduce calls.")
 
     return issues, summaries
 
@@ -279,7 +309,7 @@ def stage_three_validate(
     validated: List[Dict] = []
     for entry in validated_entries:
         verdict = (entry.get("verdict") or "").upper()
-        if verdict not in {"VALID", "SPEC-AMBIGUOUS", "PARTIAL"}:
+        if verdict not in {"VALID", "INVALID", "SPEC-AMBIGUOUS", "PARTIAL"}:
             continue
 
         try:
@@ -361,17 +391,42 @@ def main() -> None:
     tmp_dir, diff_paths = write_diff_chunks(chunks)
     try:
         stage1_issues, stage1_summaries = stage_one(diff_paths)
-        stage2_issues, stage2_summaries = stage_two(Path(tmp_dir.name), diff_paths)
 
-        merged_issues = stage_dedupe(stage1_issues + stage2_issues)
-        validated = stage_three_validate(merged_issues, Path(tmp_dir.name), diff_paths)
+        run_stage2 = False
+        if RUN_STAGE2 in SKIP_STAGE2_VALUES:
+            run_stage2 = False
+        elif RUN_STAGE2 in RUN_STAGE2_VALUES:
+            run_stage2 = True
+        else:
+            run_stage2 = len(diff_paths) > 1
+
+        if run_stage2:
+            stage2_issues, stage2_summaries = stage_two(Path(tmp_dir.name), diff_paths)
+        else:
+            stage2_issues, stage2_summaries = [], ["Stage2 skipped (single file or disabled)."]
+
+        combined = stage1_issues + stage2_issues
+        merged_issues = stage_dedupe(combined) if len(combined) > 1 else combined
+
+        run_validation = RUN_VALIDATION in RUN_VALIDATION_VALUES
+        if run_validation and merged_issues:
+            validated = stage_three_validate(merged_issues, Path(tmp_dir.name), diff_paths)
+        elif run_validation:
+            validated = merged_issues if merged_issues else []
+        else:
+            validated = merged_issues
         comments = build_comments(validated)
 
         summaries = stage1_summaries + stage2_summaries
+        if not run_validation:
+            summaries.append("Validation skipped (RUN_VALIDATION disabled).")
         if validated:
-            summaries.append(f"Validated findings: {len(validated)}")
+            if run_validation:
+                summaries.append(f"Validated findings: {len(validated)}")
+            else:
+                summaries.append(f"Findings (validation off): {len(validated)}")
         else:
-            summaries.append("No validated issues found.")
+            summaries.append("No findings identified.")
 
         gh = Github(GITHUB_TOKEN)
         repo = gh.get_repo(REPO_NAME)
