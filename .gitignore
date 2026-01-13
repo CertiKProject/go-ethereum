@@ -42,6 +42,10 @@ profile.cov
 # VS Code
 .vscode
 
+# Local metadata
+.env
+AGENTS.md
+
 tests/spec-tests/
 
 # binaries
