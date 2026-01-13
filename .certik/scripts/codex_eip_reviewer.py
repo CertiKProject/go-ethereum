@@ -356,16 +356,16 @@ def main() -> None:
         return
 
     diff_dir, diff_paths = write_diff_chunks(chunks)
-    # stage1_issues, stage1_summaries = stage_one(diff_paths)
+    stage1_issues, stage1_summaries = stage_one(diff_paths)
     stage2_issues, stage2_summaries = stage_two(diff_dir, diff_paths)
 
-    # merged_issues = stage_dedupe(stage1_issues + stage2_issues)
-    merged_issues = stage_dedupe(stage2_issues)
+    merged_issues = stage_dedupe(stage1_issues + stage2_issues)
+    # merged_issues = stage_dedupe(stage2_issues)
     validated = stage_three_validate(merged_issues, diff_dir, diff_paths)
     comments = build_comments(validated)
 
-    # summaries = stage1_summaries + stage2_summaries
-    summaries = stage2_summaries
+    summaries = stage1_summaries + stage2_summaries
+    # summaries = stage2_summaries
     if validated:
         summaries.append(f"Validated findings: {len(validated)}")
     else:
