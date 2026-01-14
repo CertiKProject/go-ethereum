@@ -3,7 +3,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from github import Github
 
@@ -20,9 +20,9 @@ PR_NUMBER = int(os.getenv("PR_NUMBER", 0))
 DIFF_FILE_PATH = sys.argv[1] if len(sys.argv) > 1 else "pr.diff"
 CODEX_MODEL = os.getenv("CODEX_MODEL", "gpt-5.1-codex-max")
 CODEX_APPROVAL = os.getenv("CODEX_APPROVAL", "never")
-EIP_SPEC_PATH = os.getenv("EIP_SPEC_PATH", "scripts/eips/eip-7825.md") #relative path to EIP spec file in the repo
 SKIP_EXTENSIONS = {".md", ".txt", ".lock"}
 REPO_ROOT = Path(__file__).resolve().parents[2]
+EIP_SPECS_DIR = REPO_ROOT / ".certik" / "eips"
 
 
 def parse_diff(diff_text: str) -> Dict[str, str]:
@@ -49,6 +49,80 @@ def parse_diff(diff_text: str) -> Dict[str, str]:
         file_chunks[current_file] = "\n".join(chunk)
 
     return file_chunks
+
+
+def get_pr_title(
+    repo_name: str,
+    pr_number: int,
+    gh_client: Optional[Github] = None,
+    pull_request: Optional[Any] = None,
+) -> str:
+    """Return the PR title using the GitHub API."""
+
+    if pull_request is not None:
+        return getattr(pull_request, "title", "") or ""
+
+    client = gh_client
+    if client is None:
+        if not GITHUB_TOKEN:
+            print("Missing GITHUB_TOKEN; cannot fetch PR title.")
+            return ""
+        client = Github(GITHUB_TOKEN)
+
+    try:
+        repo = client.get_repo(repo_name)
+        pull = repo.get_pull(pr_number)
+        return pull.title or ""
+    except Exception as exc:  # pragma: no cover - network failure
+        print(f"Error fetching PR title: {exc}")
+        return ""
+
+
+def extract_eip_numbers(text: str) -> List[str]:
+    """Extract unique EIP numbers from the provided text."""
+
+    if not text:
+        return []
+
+    matches = re.findall(r"eip[-\s]?(\d+)", text, flags=re.IGNORECASE)
+    normalized: List[str] = []
+    for match in matches:
+        normalized.append(match.lstrip("0") or "0")
+
+    # Preserve discovery order while removing duplicates.
+    return list(dict.fromkeys(normalized))
+
+
+def get_eip_spec_path(eip_number: str) -> Path:
+    """Return the path to the EIP document inside .certik/eips."""
+
+    sanitized = eip_number.strip()
+    filename = f"eip-{sanitized}.md"
+    return EIP_SPECS_DIR / filename
+
+
+def load_eip_document(eip_number: str) -> str:
+    """Load and return the content of the requested EIP document."""
+
+    path = get_eip_spec_path(eip_number)
+    if not path.exists():
+        return ""
+
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"Error reading {path}: {exc}")
+        return ""
+
+
+def format_eip_hint(spec_paths: List[Path]) -> str:
+    """Format the EIP reference hint passed into Codex prompts."""
+
+    if not spec_paths:
+        return "not provided"
+
+    refs = ", ".join(f"@{path.as_posix()}" for path in spec_paths)
+    return refs or "not provided"
 
 
 def write_diff_chunks(chunks: Dict[str, str]) -> Tuple[Path, Dict[str, Path]]:
@@ -126,8 +200,12 @@ def normalize_issues(payload: Dict, default_path: str, stage: str) -> Tuple[List
     return issues, summary.strip()
 
 
-def build_stage_one_prompt(file_path: str, diff_file: Path) -> str:
-    eip_hint = f"@{EIP_SPEC_PATH}" if EIP_SPEC_PATH else "not provided"
+def build_stage_one_prompt(
+    file_path: str,
+    diff_file: Path,
+    eip_hint: str = "not provided",
+) -> str:
+    hint = eip_hint or "not provided"
     schema_hint = (
         '{ "summary": "<short risk summary>", '
         '"issues": [ { "path": "<file path>", "line": <new file line>, '
@@ -138,15 +216,19 @@ def build_stage_one_prompt(file_path: str, diff_file: Path) -> str:
         f"{EIP_consitency_check_preprompt}\n\n"
         "Stage: per-file diff review.\n"
         f"- Diff file path: {diff_file}\n"
-        f"- EIP spec path: {eip_hint}\n"
+        f"- EIP spec path: {hint}\n"
         "Output JSON only using this schema:\n"
         f"{schema_hint}\n"
         "Use an empty issues array if there are no findings."
     )
 
 
-def build_stage_two_prompt(diff_dir: Path, diff_paths: Dict[str, Path]) -> str:
-    eip_hint = f"@{EIP_SPEC_PATH}" if EIP_SPEC_PATH else "not provided"
+def build_stage_two_prompt(
+    diff_dir: Path,
+    diff_paths: Dict[str, Path],
+    eip_hint: str = "not provided",
+) -> str:
+    hint = eip_hint or "not provided"
     path_list = "\n".join(f"- {p}" for p in diff_paths.values())
     schema_hint = (
         '{ "summary": "<cross-file risk summary>", '
@@ -159,7 +241,7 @@ def build_stage_two_prompt(diff_dir: Path, diff_paths: Dict[str, Path]) -> str:
         "Stage: cross-file review across the entire PR.\n"
         f"- Diff directory: {diff_dir}\n"
         f"- Diff files:\n{path_list}\n"
-        f"- EIP spec path: {eip_hint}\n\n"
+        f"- EIP spec path: {hint}\n\n"
         "Output JSON only using this schema:\n"
         f"{schema_hint}\n"
         "Use an empty issues array if there are no findings."
@@ -190,8 +272,9 @@ def build_validation_prompt(
     issues: List[Dict],
     diff_dir: Path,
     diff_paths: Dict[str, Path],
+    eip_hint: str = "not provided",
 ) -> str:
-    eip_hint = f"@{EIP_SPEC_PATH}" if EIP_SPEC_PATH else "not provided"
+    hint = eip_hint or "not provided"
     issue_blob = json.dumps(issues, indent=2)
     path_list = "\n".join(f"- {p}" for p in diff_paths.values())
     schema_hint = (
@@ -203,7 +286,7 @@ def build_validation_prompt(
     )
     return (
         f"{EIP_finding_validation_preprompt}\n\n"
-        f"- EIP spec path: {eip_hint}\n"
+        f"- EIP spec path: {hint}\n"
         f"- Diff directory: {diff_dir}\n"
         f"- Diff files:\n{path_list}\n\n"
         "Issues to validate (JSON):\n"
@@ -227,14 +310,17 @@ def run_codex_json(prompt: str) -> Dict:
     return data
 
 
-def stage_one(diff_paths: Dict[str, Path]) -> Tuple[List[Dict], List[str]]:
+def stage_one(
+    diff_paths: Dict[str, Path],
+    eip_hint: str = "not provided",
+) -> Tuple[List[Dict], List[str]]:
     issues: List[Dict] = []
     summaries: List[str] = []
 
     for path, diff_file in diff_paths.items():
         if Path(path).suffix in SKIP_EXTENSIONS:
             continue
-        prompt = build_stage_one_prompt(path, diff_file)
+        prompt = build_stage_one_prompt(path, diff_file, eip_hint)
         data = run_codex_json(prompt)
         file_issues, summary = normalize_issues(data, path, "stage1")
         issues.extend(file_issues)
@@ -244,8 +330,12 @@ def stage_one(diff_paths: Dict[str, Path]) -> Tuple[List[Dict], List[str]]:
     return issues, summaries
 
 
-def stage_two(diff_dir: Path, diff_paths: Dict[str, Path]) -> Tuple[List[Dict], List[str]]:
-    prompt = build_stage_two_prompt(diff_dir, diff_paths)
+def stage_two(
+    diff_dir: Path,
+    diff_paths: Dict[str, Path],
+    eip_hint: str = "not provided",
+) -> Tuple[List[Dict], List[str]]:
+    prompt = build_stage_two_prompt(diff_dir, diff_paths, eip_hint)
     data = run_codex_json(prompt)
     issues, summary = normalize_issues(data, default_path="", stage="stage2")
     summaries = [f"cross-file: {summary}"] if summary else []
@@ -265,11 +355,17 @@ def stage_three_validate(
     combined_issues: List[Dict],
     diff_dir: Path,
     diff_paths: Dict[str, Path],
+    eip_hint: str = "not provided",
 ) -> List[Dict]:
     if not combined_issues:
         return []
 
-    prompt = build_validation_prompt(combined_issues, diff_dir, diff_paths)
+    prompt = build_validation_prompt(
+        combined_issues,
+        diff_dir,
+        diff_paths,
+        eip_hint,
+    )
     data = run_codex_json(prompt)
     validated_entries = data.get("validated") or data.get("issues") or []
 
@@ -341,14 +437,73 @@ def build_comments(validated: List[Dict]) -> List[Dict]:
 
 
 def main() -> None:
-    # if not Path(DIFF_FILE_PATH).exists():
-    #     print(f"Diff file not found at {DIFF_FILE_PATH}")
-    #     return
-    # if not (GITHUB_TOKEN and REPO_NAME and PR_NUMBER):
-    #     print("Missing required environment variables (GITHUB_TOKEN, REPO_NAME, PR_NUMBER).")
-    #     return
+    diff_path = Path(DIFF_FILE_PATH)
+    if not diff_path.exists():
+        print(f"Diff file not found at {diff_path}")
+        return
 
-    diff_text = Path(DIFF_FILE_PATH).read_text(encoding="utf-8")
+    if not (GITHUB_TOKEN and REPO_NAME and PR_NUMBER):
+        print("Missing required environment variables (GITHUB_TOKEN, REPO_NAME, PR_NUMBER).")
+        return
+
+    gh = Github(GITHUB_TOKEN)
+    try:
+        repo = gh.get_repo(REPO_NAME)
+        pull = repo.get_pull(PR_NUMBER)
+    except Exception as exc:  # pragma: no cover - network failure
+        print(f"Failed to initialize GitHub client: {exc}")
+        return
+
+    pr_title = get_pr_title(REPO_NAME, PR_NUMBER, gh_client=gh, pull_request=pull)
+    if not pr_title:
+        print(f"Failed to fetch PR title for {REPO_NAME}#{PR_NUMBER}")
+        return
+
+    print(f"PR Title: {pr_title}")
+
+    eip_numbers = extract_eip_numbers(pr_title)
+    if not eip_numbers:
+        print("No EIP found in PR title. This PR does not require EIP review.")
+        try:
+            pull.create_issue_comment(
+                "ℹ️ No EIP numbers found in the PR title. This PR does not require EIP review."
+            )
+        except Exception as exc:  # pragma: no cover - network failure
+            print(f"Failed to post informational comment: {exc}")
+        return
+
+    print(f"EIPs found: {eip_numbers}")
+
+    eip_specs: Dict[str, str] = {}
+    eip_spec_paths: List[Path] = []
+    for eip_num in eip_numbers:
+        eip_content = load_eip_document(eip_num)
+        if eip_content:
+            eip_specs[eip_num] = eip_content
+            spec_path = get_eip_spec_path(eip_num)
+            try:
+                rel_path = spec_path.relative_to(REPO_ROOT)
+            except ValueError:
+                rel_path = spec_path
+            eip_spec_paths.append(rel_path)
+            print(f"Loaded EIP-{eip_num}")
+        else:
+            print(f"Warning: EIP-{eip_num} not found in .certik/eips/")
+
+    if not eip_specs:
+        print("No EIP documents found. Unable to proceed with review.")
+        try:
+            pull.create_issue_comment(
+                "⚠️ Unable to find any EIP documents for the EIPs mentioned in the PR title. "
+                "Please ensure the EIP files are present in the `.certik/eips/` directory."
+            )
+        except Exception as exc:  # pragma: no cover - network failure
+            print(f"Failed to post missing EIP comment: {exc}")
+        return
+
+    eip_hint = format_eip_hint(eip_spec_paths)
+
+    diff_text = diff_path.read_text(encoding="utf-8")
     chunks = parse_diff(diff_text)
 
     if not chunks:
@@ -356,12 +511,12 @@ def main() -> None:
         return
 
     diff_dir, diff_paths = write_diff_chunks(chunks)
-    # stage1_issues, stage1_summaries = stage_one(diff_paths)
-    stage2_issues, stage2_summaries = stage_two(diff_dir, diff_paths)
+    # stage1_issues, stage1_summaries = stage_one(diff_paths, eip_hint)
+    stage2_issues, stage2_summaries = stage_two(diff_dir, diff_paths, eip_hint)
 
     # merged_issues = stage_dedupe(stage1_issues + stage2_issues)
     merged_issues = stage_dedupe(stage2_issues)
-    validated = stage_three_validate(merged_issues, diff_dir, diff_paths)
+    validated = stage_three_validate(merged_issues, diff_dir, diff_paths, eip_hint)
     comments = build_comments(validated)
 
     # summaries = stage1_summaries + stage2_summaries
@@ -371,14 +526,12 @@ def main() -> None:
     else:
         summaries.append("No validated issues found.")
 
-    gh = Github(GITHUB_TOKEN)
-    repo = gh.get_repo(REPO_NAME)
-    pull = repo.get_pull(PR_NUMBER)
     print("Codex Review Summary:", "\n".join(summaries))
+    review_body = "\n".join(f"- {s}" for s in summaries)
     if comments:
-        pull.create_review(body="\n".join(f"- {s}" for s in summaries), event="COMMENT", comments=comments)
+        pull.create_review(body=review_body, event="COMMENT", comments=comments)
     else:
-        pull.create_review(body="\n".join(f"- {s}" for s in summaries), event="COMMENT")
+        pull.create_review(body=review_body, event="COMMENT")
 
     print(f"Posted Codex review with {len(comments)} inline comments.")
 
