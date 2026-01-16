@@ -126,8 +126,8 @@ def load_eip_document(eip_number: str) -> str:
 def download_missing_eip(eip_number: str) -> bool:
     """Download a missing EIP using EIPDownloader."""
     try:
+        downloader = EIPDownloader(output_dir=str(EIP_SPECS_DIR))
         return downloader.download_eip(int(eip_number), verbose=True)
-        return success
     except Exception as exc:
         print(f"Error downloading EIP-{eip_number}: {exc}")
         return False
