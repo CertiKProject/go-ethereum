@@ -2,6 +2,7 @@ import json
 import os
 import re
 import sys
+
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -13,6 +14,7 @@ from codex_runner import (
     EIP_dedupe_preprompt,
     run_codex,
 )
+from eip_download import EIPDownloader
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 REPO_NAME = os.getenv("REPO_NAME")
@@ -106,6 +108,12 @@ def load_eip_document(eip_number: str) -> str:
 
     path = get_eip_spec_path(eip_number)
     if not path.exists():
+        # Try to download the missing EIP
+        print(f"EIP-{eip_number} not found locally. Attempting to download...")
+        download_success = download_missing_eip(eip_number)
+        if not download_success:
+            print(f"Download of EIP-{eip_number} reported failure.")
+    if not path.exists():
         return ""
 
     try:
@@ -113,6 +121,16 @@ def load_eip_document(eip_number: str) -> str:
     except OSError as exc:
         print(f"Error reading {path}: {exc}")
         return ""
+
+
+def download_missing_eip(eip_number: str) -> bool:
+    """Download a missing EIP using EIPDownloader."""
+    try:
+        return downloader.download_eip(int(eip_number), verbose=True)
+        return success
+    except Exception as exc:
+        print(f"Error downloading EIP-{eip_number}: {exc}")
+        return False
 
 
 def format_eip_hint(spec_paths: List[Path]) -> str:
